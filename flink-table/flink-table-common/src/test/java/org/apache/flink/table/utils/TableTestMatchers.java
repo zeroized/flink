@@ -20,6 +20,7 @@ package org.apache.flink.table.utils;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowUtils;
 
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
@@ -27,45 +28,29 @@ import org.hamcrest.Matcher;
 
 import java.util.List;
 
-/**
- * List of matchers that might be useful in the table ecosystem.
- */
+/** List of matchers that might be useful in the table ecosystem. */
 @Internal
 public final class TableTestMatchers {
 
-	public static Matcher<Row> deepEqualTo(Row row) {
-		return new BaseMatcher<Row>() {
+    public static Matcher<List<Row>> deepEqualTo(List<Row> rows, boolean ignoreOrder) {
+        return new BaseMatcher<List<Row>>() {
 
-			@Override
-			public void describeTo(Description description) {
-				description.appendValue(row);
-			}
+            @Override
+            public void describeTo(Description description) {
+                description.appendValueList("", "\n", "", rows);
+            }
 
-			@Override
-			public boolean matches(Object item) {
-				return Row.deepEquals(row, (Row) item);
-			}
-		};
-	}
+            @Override
+            @SuppressWarnings("unchecked")
+            public void describeMismatch(Object item, Description description) {
+                description.appendText("was ").appendValueList("", "\n", "", (List<Row>) item);
+            }
 
-	public static Matcher<List<Row>> deepEqualTo(List<Row> rows) {
-		return new BaseMatcher<List<Row>>() {
-
-			@Override
-			public void describeTo(Description description) {
-				description.appendValueList("", "\n", "", rows);
-			}
-
-			@Override
-			public void describeMismatch(Object item, Description description) {
-				description.appendText("was ").appendValueList("", "\n", "", rows);
-			}
-
-			@Override
-			@SuppressWarnings("unchecked")
-			public boolean matches(Object item) {
-				return Row.deepEquals(rows, (List<Row>) item);
-			}
-		};
-	}
+            @Override
+            @SuppressWarnings("unchecked")
+            public boolean matches(Object item) {
+                return RowUtils.compareRows(rows, (List<Row>) item, ignoreOrder);
+            }
+        };
+    }
 }

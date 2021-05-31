@@ -61,6 +61,8 @@ Important classes of Flink Table API:
       Base interface for user-defined table function.
     - :class:`pyflink.table.AggregateFunction`
       Base interface for user-defined aggregate function.
+    - :class:`pyflink.table.TableAggregateFunction`
+      Base interface for user-defined table aggregate function.
     - :class:`pyflink.table.StatementSet`
       Base interface accepts DML statements or Tables.
 """
@@ -70,7 +72,7 @@ from pyflink.table.data_view import DataView, ListView, MapView
 from pyflink.table.environment_settings import EnvironmentSettings
 from pyflink.table.explain_detail import ExplainDetail
 from pyflink.table.expression import Expression
-from pyflink.table.module import Module
+from pyflink.table.module import Module, ModuleEntry
 from pyflink.table.result_kind import ResultKind
 from pyflink.table.sinks import CsvTableSink, TableSink, WriteMode
 from pyflink.table.sources import CsvTableSource, TableSource
@@ -79,16 +81,15 @@ from pyflink.table.statement_set import StatementSet
 from pyflink.table.table import GroupWindowedTable, GroupedTable, OverWindowedTable, Table, \
     WindowGroupedTable
 from pyflink.table.table_config import TableConfig
-from pyflink.table.table_environment import (TableEnvironment, StreamTableEnvironment,
-                                             BatchTableEnvironment)
+from pyflink.table.table_environment import (TableEnvironment, StreamTableEnvironment)
 from pyflink.table.table_result import TableResult
 from pyflink.table.table_schema import TableSchema
 from pyflink.table.types import DataTypes, UserDefinedType, Row, RowKind
-from pyflink.table.udf import FunctionContext, ScalarFunction, TableFunction, AggregateFunction
+from pyflink.table.udf import FunctionContext, ScalarFunction, TableFunction, AggregateFunction, \
+    TableAggregateFunction
 
 __all__ = [
     'AggregateFunction',
-    'BatchTableEnvironment',
     'CsvTableSink',
     'CsvTableSource',
     'DataTypes',
@@ -102,6 +103,7 @@ __all__ = [
     'ListView',
     'MapView',
     'Module',
+    'ModuleEntry',
     'OverWindowedTable',
     'ResultKind',
     'Row',
@@ -118,6 +120,7 @@ __all__ = [
     'TableSchema',
     'TableSink',
     'TableSource',
+    'TableAggregateFunction',
     'UserDefinedType',
     'WindowGroupedTable',
     'WriteMode'

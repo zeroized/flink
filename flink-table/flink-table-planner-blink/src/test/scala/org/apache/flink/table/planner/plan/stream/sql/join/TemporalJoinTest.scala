@@ -147,6 +147,32 @@ class TemporalJoinTest extends TableTestBase {
     util.addTable("CREATE VIEW rates_last_value AS SELECT currency, LAST_VALUE(rate) AS rate " +
       "FROM RatesHistory " +
       "GROUP BY currency ")
+
+    util.tableEnv.executeSql(
+      s"""
+          |CREATE TABLE OrdersLtz (
+          | amount INT,
+          | currency STRING,
+          | ts BIGINT,
+          | rowtime AS TO_TIMESTAMP_LTZ(ts, 3),
+          | WATERMARK FOR rowtime AS rowtime
+          |) WITH (
+          | 'connector' = 'values'
+          |)
+      """.stripMargin)
+    util.tableEnv.executeSql(
+      s"""
+         |CREATE TABLE RatesLtz (
+         | currency STRING,
+         | rate INT,
+         | ts BIGINT,
+         | rowtime as TO_TIMESTAMP_LTZ(ts, 3),
+         | WATERMARK FOR rowtime AS rowtime,
+         | PRIMARY KEY(currency) NOT ENFORCED
+         |) WITH (
+         | 'connector' = 'values'
+         |)
+      """.stripMargin)
   }
 
   @Test
@@ -156,7 +182,7 @@ class TemporalJoinTest extends TableTestBase {
       "RatesHistoryLegacy FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -166,7 +192,7 @@ class TemporalJoinTest extends TableTestBase {
       "RatesHistoryLegacy FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "ON o.currency = r.currency"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -176,7 +202,17 @@ class TemporalJoinTest extends TableTestBase {
       "RatesHistoryWithPK FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
+  }
+
+
+  @Test
+  def testEventTimeTemporalJoinOnTimestampLtzRowtime(): Unit = {
+    val sqlQuery = "SELECT * " +
+      "FROM OrdersLtz AS o JOIN " +
+      "RatesLtz FOR SYSTEM_TIME AS OF o.rowtime AS r " +
+      "ON o.currency = r.currency"
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -187,7 +223,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -198,7 +234,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency AND r.rate + 1 = 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -209,7 +245,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency AND 'RMB-100' = concat('RMB-', cast(r.rate AS STRING))"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -220,7 +256,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency AND o.amount > r.rate"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -231,7 +267,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency AND amount > 10 AND r.rate < 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -242,7 +278,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency AND amount > 10 AND r.rate < 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -253,7 +289,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -264,7 +300,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -275,7 +311,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency AND o.amount > r.rate"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -286,7 +322,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency AND o.amount > 10 AND r.rate < 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -297,7 +333,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency AND o.amount > 10 AND r.rate < 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -308,7 +344,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "on o.currency = r.currency AND o.amount > 10 AND r.rate < 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -319,7 +355,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency AND o.amount > 10 AND r.rate < 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -330,7 +366,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency AND r.rate + 1 = 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -341,7 +377,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency AND r.rate + 1 = 100"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -352,7 +388,7 @@ class TemporalJoinTest extends TableTestBase {
       "FOR SYSTEM_TIME AS OF o.proctime AS r " +
       "on o.currency = r.currency AND 'RMB-100' = concat('RMB-', cast(r.rate AS STRING))"
 
-    util.verifyPlan(sqlQuery)
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
@@ -375,6 +411,16 @@ class TemporalJoinTest extends TableTestBase {
         s" left table's time attribute field",
       classOf[ValidationException])
 
+    val sqlQuery2 = "SELECT * " +
+      "FROM Orders AS o JOIN " +
+      "RatesHistoryWithPK FOR SYSTEM_TIME AS OF o.rowtime AS r " +
+      "ON o.amount = r.rate"
+    expectExceptionThrown(
+      sqlQuery2,
+      "Temporal table's primary key [currency0] must be included in the equivalence" +
+        " condition of temporal join, but current temporal join condition is [amount=rate].",
+      classOf[ValidationException])
+
     util.addTable(
       """
         |CREATE TABLE versionedTableWithoutPk (
@@ -387,14 +433,17 @@ class TemporalJoinTest extends TableTestBase {
         |)
       """.stripMargin)
 
-    val sqlQuery2 = "SELECT * " +
+    val sqlQuery3 = "SELECT * " +
       "FROM Orders AS o JOIN " +
-      "RatesHistoryWithPK FOR SYSTEM_TIME AS OF o.rowtime AS r " +
-      "ON o.amount = r.rate"
+      "versionedTableWithoutPk FOR SYSTEM_TIME AS OF o.rowtime AS r " +
+      "ON o.currency = r.currency"
     expectExceptionThrown(
-      sqlQuery2,
-      s"Join key must be the same as temporal table's primary key " +
-        s"in Event-time temporal table join",
+      sqlQuery3,
+      "Temporal Table Join requires primary key in versioned table, " +
+        "but no primary key can be found. The physical plan is:\n" +
+        "FlinkLogicalJoin(condition=[AND(=($1, $4), " +
+        "__INITIAL_TEMPORAL_JOIN_CONDITION($2, $6, __TEMPORAL_JOIN_LEFT_KEY($1), " +
+        "__TEMPORAL_JOIN_RIGHT_KEY($4)))], joinType=[inner])",
       classOf[ValidationException])
 
     util.addTable(
@@ -408,12 +457,12 @@ class TemporalJoinTest extends TableTestBase {
         | 'connector' = 'values'
         |)
       """.stripMargin)
-    val sqlQuery3 = "SELECT * " +
+    val sqlQuery4 = "SELECT * " +
       "FROM Orders AS o JOIN " +
       "versionedTableWithoutTimeAttribute FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency"
     expectExceptionThrown(
-      sqlQuery3,
+      sqlQuery4,
       s"Event-Time Temporal Table Join requires both primary key and row time attribute in " +
         s"versioned table, but no row time attribute can be found.",
       classOf[ValidationException])
@@ -430,14 +479,43 @@ class TemporalJoinTest extends TableTestBase {
         | 'connector' = 'values'
         |)
       """.stripMargin)
-    val sqlQuery4 = "SELECT * " +
+    val sqlQuery5 = "SELECT * " +
       "FROM Orders AS o JOIN " +
       "versionedTableWithoutRowtime FOR SYSTEM_TIME AS OF o.rowtime AS r " +
       "ON o.currency = r.currency"
     expectExceptionThrown(
-      sqlQuery4,
+      sqlQuery5,
       s"Event-Time Temporal Table Join requires both primary key and row time attribute in " +
         s"versioned table, but no row time attribute can be found.",
+      classOf[ValidationException])
+
+    val sqlQuery6 = "SELECT * FROM RatesHistory " +
+      "FOR SYSTEM_TIME AS OF TIMESTAMP '2020-11-11 13:12:13'"
+    expectExceptionThrown(
+      sqlQuery6,
+      "Querying a temporal table using 'FOR SYSTEM TIME AS OF' syntax with a constant timestamp " +
+        "'2020-11-11 13:12:13' is not supported yet.",
+      classOf[AssertionError])
+
+    val sqlQuery7 = "SELECT * FROM RatesHistory FOR SYSTEM_TIME AS OF " +
+      "TO_TIMESTAMP(FROM_UNIXTIME(1))"
+    expectExceptionThrown(
+      sqlQuery7,
+      "Querying a temporal table using 'FOR SYSTEM TIME AS OF' syntax with an expression call " +
+        "'TO_TIMESTAMP(FROM_UNIXTIME(1))' is not supported yet.",
+      classOf[AssertionError])
+
+    val sqlQuery8 =
+      s"""
+          |SELECT *
+          | FROM OrdersLtz AS o JOIN
+          | RatesHistoryWithPK FOR SYSTEM_TIME AS OF o.rowtime AS r
+          | ON o.currency = r.currency
+          """.stripMargin
+    expectExceptionThrown(
+      sqlQuery8,
+      "Event-Time Temporal Table Join requires same rowtime type in left table and versioned" +
+        " table, but the rowtime types are TIMESTAMP_LTZ(3) *ROWTIME* and TIMESTAMP(3) *ROWTIME*.",
       classOf[ValidationException])
   }
 

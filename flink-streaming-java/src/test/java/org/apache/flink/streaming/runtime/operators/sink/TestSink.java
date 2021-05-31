@@ -21,266 +21,372 @@ package org.apache.flink.streaming.runtime.operators.sink;
 import org.apache.flink.api.connector.sink.Committer;
 import org.apache.flink.api.connector.sink.GlobalCommitter;
 import org.apache.flink.api.connector.sink.Sink;
-import org.apache.flink.api.connector.sink.Writer;
+import org.apache.flink.api.connector.sink.SinkWriter;
+import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
+import org.apache.flink.streaming.api.functions.sink.filesystem.bucketassigners.SimpleVersionedStringSerializer;
 
+import javax.annotation.Nullable;
+
+import java.io.IOException;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-/**
- * A {@link Sink} for testing that uses {@link Supplier Suppliers} to create various components
- * under test.
- */
-class TestSink<InputT, CommT, WriterStateT, GlobalCommT>
-		implements Sink<InputT, CommT, WriterStateT, GlobalCommT> {
+import static org.apache.flink.util.Preconditions.checkNotNull;
+import static org.junit.Assert.assertNotNull;
 
-	static final DefaultWriter<String> DEFAULT_WRITER = new DefaultWriter<>();
+/** A {@link Sink TestSink} for all the sink related tests. */
+public class TestSink implements Sink<Integer, String, String, String> {
 
-	private final Function<List<WriterStateT>, Writer<InputT, CommT, WriterStateT>> writerSupplier;
-	private final Supplier<Optional<SimpleVersionedSerializer<WriterStateT>>> writerStateSerializerSupplier;
+    private final DefaultSinkWriter writer;
 
-	private final Supplier<Optional<Committer<CommT>>> committerSupplier;
-	private final Supplier<Optional<SimpleVersionedSerializer<CommT>>> committableSerializerSupplier;
+    @Nullable private final SimpleVersionedSerializer<String> writerStateSerializer;
 
-	private final Supplier<Optional<GlobalCommitter<CommT, GlobalCommT>>> globalCommitterSupplier;
-	private final Supplier<Optional<SimpleVersionedSerializer<GlobalCommT>>> globalCommitterSerializerSupplier;
+    @Nullable private final Committer<String> committer;
 
-	public static <InputT, CommT, WriterStateT, GlobalCommT> TestSink<InputT, CommT, WriterStateT, GlobalCommT> create(
-			Supplier<Writer<InputT, CommT, WriterStateT>> writer) {
-		// We cannot replace this by a method reference because the Java compiler will not be
-		// able to typecheck it.
-		//noinspection Convert2MethodRef
-		return new TestSink<>((state) -> writer.get(), () -> Optional.empty());
-	}
+    @Nullable private final SimpleVersionedSerializer<String> committableSerializer;
 
-	public static <InputT, CommT, WriterStateT, GlobalCommT> TestSink<InputT, CommT, WriterStateT, GlobalCommT> create(
-			Supplier<Writer<InputT, CommT, WriterStateT>> writer,
-			Supplier<Optional<SimpleVersionedSerializer<WriterStateT>>> writerStateSerializerSupplier) {
-		return new TestSink<>((state) -> writer.get(), writerStateSerializerSupplier);
-	}
+    @Nullable private final GlobalCommitter<String, String> globalCommitter;
 
-	public static <InputT, CommT, WriterStateT, GlobalCommT> TestSink<InputT, CommT, WriterStateT, GlobalCommT> create(
-			Function<List<WriterStateT>, Writer<InputT, CommT, WriterStateT>> writer,
-			Supplier<Optional<SimpleVersionedSerializer<WriterStateT>>> writerStateSerializerSupplier) {
-		return new TestSink<>(writer, writerStateSerializerSupplier);
-	}
+    @Nullable private final SimpleVersionedSerializer<String> globalCommittableSerializer;
 
-	public static <InputT, CommT, WriterStateT, GlobalCommT> TestSink<InputT, CommT, WriterStateT, GlobalCommT> create(
-			Supplier<Writer<InputT, CommT, WriterStateT>> writer,
-			Supplier<Optional<Committer<CommT>>> committerSupplier,
-			Supplier<Optional<SimpleVersionedSerializer<CommT>>> committableSerializerSupplier,
-			Supplier<Optional<GlobalCommitter<CommT, GlobalCommT>>> globalCommitterSupplier,
-			Supplier<Optional<SimpleVersionedSerializer<GlobalCommT>>> globalCommittableSerializer) {
-		return new TestSink<>(
-				(s) -> writer.get(),
-				() -> Optional.empty(),
-				committerSupplier,
-				committableSerializerSupplier,
-				globalCommitterSupplier,
-				globalCommittableSerializer);
-	}
+    private TestSink(
+            DefaultSinkWriter writer,
+            @Nullable SimpleVersionedSerializer<String> writerStateSerializer,
+            @Nullable Committer<String> committer,
+            @Nullable SimpleVersionedSerializer<String> committableSerializer,
+            @Nullable GlobalCommitter<String, String> globalCommitter,
+            @Nullable SimpleVersionedSerializer<String> globalCommittableSerializer) {
+        this.writer = writer;
+        this.writerStateSerializer = writerStateSerializer;
+        this.committer = committer;
+        this.committableSerializer = committableSerializer;
+        this.globalCommitter = globalCommitter;
+        this.globalCommittableSerializer = globalCommittableSerializer;
+    }
 
-	private TestSink(
-			Function<List<WriterStateT>, Writer<InputT, CommT, WriterStateT>> writerSupplier,
-			Supplier<Optional<SimpleVersionedSerializer<WriterStateT>>> writerStateSerializerSupplier,
-			Supplier<Optional<Committer<CommT>>> committerSupplier,
-			Supplier<Optional<SimpleVersionedSerializer<CommT>>> committableSerializerSupplier,
-			Supplier<Optional<GlobalCommitter<CommT, GlobalCommT>>> globalCommitterSupplier,
-			Supplier<Optional<SimpleVersionedSerializer<GlobalCommT>>> globalCommitterSerializerSupplier) {
-		this.writerSupplier = writerSupplier;
-		this.writerStateSerializerSupplier = writerStateSerializerSupplier;
-		this.committerSupplier = committerSupplier;
-		this.committableSerializerSupplier = committableSerializerSupplier;
-		this.globalCommitterSupplier = globalCommitterSupplier;
-		this.globalCommitterSerializerSupplier = globalCommitterSerializerSupplier;
-	}
+    @Override
+    public SinkWriter<Integer, String, String> createWriter(
+            InitContext context, List<String> states) {
+        writer.restoredFrom(states);
+        writer.setProcessingTimerService(context.getProcessingTimeService());
+        return writer;
+    }
 
-	private TestSink(
-			Function<List<WriterStateT>, Writer<InputT, CommT, WriterStateT>> writer,
-			Supplier<Optional<SimpleVersionedSerializer<WriterStateT>>> writerStateSerializerSupplier) {
-		this(
-				writer,
-				writerStateSerializerSupplier,
-				Optional::empty,
-				Optional::empty,
-				Optional::empty,
-				Optional::empty);
-	}
+    @Override
+    public Optional<Committer<String>> createCommitter() {
+        return Optional.ofNullable(committer);
+    }
 
-	@Override
-	public Writer<InputT, CommT, WriterStateT> createWriter(
-			InitContext context,
-			List<WriterStateT> states) {
-		return writerSupplier.apply(states);
-	}
+    @Override
+    public Optional<GlobalCommitter<String, String>> createGlobalCommitter() {
+        return Optional.ofNullable(globalCommitter);
+    }
 
-	@Override
-	public Optional<Committer<CommT>> createCommitter() {
-		return committerSupplier.get();
-	}
+    @Override
+    public Optional<SimpleVersionedSerializer<String>> getCommittableSerializer() {
+        return Optional.ofNullable(committableSerializer);
+    }
 
-	@Override
-	public Optional<GlobalCommitter<CommT, GlobalCommT>> createGlobalCommitter() {
-		return globalCommitterSupplier.get();
-	}
+    @Override
+    public Optional<SimpleVersionedSerializer<String>> getGlobalCommittableSerializer() {
+        return Optional.ofNullable(globalCommittableSerializer);
+    }
 
-	@Override
-	public Optional<SimpleVersionedSerializer<CommT>> getCommittableSerializer() {
-		return committableSerializerSupplier.get();
-	}
+    @Override
+    public Optional<SimpleVersionedSerializer<String>> getWriterStateSerializer() {
+        return Optional.ofNullable(writerStateSerializer);
+    }
 
-	@Override
-	public Optional<SimpleVersionedSerializer<GlobalCommT>> getGlobalCommittableSerializer() {
-		return globalCommitterSerializerSupplier.get();
-	}
+    public static Builder newBuilder() {
+        return new Builder();
+    }
 
-	@Override
-	public Optional<SimpleVersionedSerializer<WriterStateT>> getWriterStateSerializer() {
-		return writerStateSerializerSupplier.get();
-	}
+    /** A builder class for {@link TestSink}. */
+    public static class Builder {
 
-	/**
-	 * This is default writer used for testing {@link Committer} and {@link GlobalCommitter}'s operator.
-	 */
-	static class DefaultWriter<CommT> implements Writer<CommT, CommT, CommT> {
+        private DefaultSinkWriter writer = new DefaultSinkWriter();
 
-		@Override
-		public void write(CommT element, Context context) {
-			//do nothing
-		}
+        private SimpleVersionedSerializer<String> writerStateSerializer;
 
-		@Override
-		public List<CommT> prepareCommit(boolean flush) {
-			return Collections.emptyList();
-		}
+        private Committer<String> committer;
 
-		@Override
-		public List<CommT> snapshotState() {
-			return Collections.emptyList();
-		}
+        private SimpleVersionedSerializer<String> committableSerializer;
 
-		@Override
-		public void close() throws Exception {
+        private GlobalCommitter<String, String> globalCommitter;
 
-		}
-	}
+        private SimpleVersionedSerializer<String> globalCommittableSerializer;
 
-	/**
-	 * Base class for testing {@link Committer} and {@link GlobalCommitter}.
-	 */
-	abstract static class AbstractTestCommitter<CommT> implements Committer<CommT> {
+        public Builder setWriter(DefaultSinkWriter writer) {
+            this.writer = checkNotNull(writer);
+            return this;
+        }
 
-		protected List<CommT> committedData;
+        public Builder withWriterState() {
+            this.writerStateSerializer = StringCommittableSerializer.INSTANCE;
+            return this;
+        }
 
-		private boolean isClosed;
+        public Builder setCommitter(Committer<String> committer) {
+            this.committer = committer;
+            return this;
+        }
 
-		public AbstractTestCommitter() {
-			this.committedData = new ArrayList<>();
-			this.isClosed = false;
-		}
+        public Builder setCommittableSerializer(
+                SimpleVersionedSerializer<String> committableSerializer) {
+            this.committableSerializer = committableSerializer;
+            return this;
+        }
 
-		public List<CommT> getCommittedData() {
-			return committedData;
-		}
+        public Builder setDefaultCommitter() {
+            this.committer = new DefaultCommitter();
+            this.committableSerializer = StringCommittableSerializer.INSTANCE;
+            return this;
+        }
 
-		@Override
-		public void close() throws Exception {
-			isClosed = true;
-		}
+        public Builder setDefaultCommitter(Supplier<Queue<String>> queueSupplier) {
+            this.committer = new DefaultCommitter(queueSupplier);
+            this.committableSerializer = StringCommittableSerializer.INSTANCE;
+            return this;
+        }
 
-		public boolean isClosed() {
-			return isClosed;
-		}
-	}
+        public Builder setGlobalCommitter(GlobalCommitter<String, String> globalCommitter) {
+            this.globalCommitter = globalCommitter;
+            return this;
+        }
 
-	/**
-	 * The class used for normal committer test.
-	 */
-	static class TestCommitter extends AbstractTestCommitter<String> {
+        public Builder setGlobalCommittableSerializer(
+                SimpleVersionedSerializer<String> globalCommittableSerializer) {
+            this.globalCommittableSerializer = globalCommittableSerializer;
+            return this;
+        }
 
-		@Override
-		public List<String> commit(List<String> committables) {
-			if (committedData != null) {
-				committedData.addAll(committables);
-			}
-			return Collections.emptyList();
-		}
-	}
+        public Builder setDefaultGlobalCommitter() {
+            this.globalCommitter = new DefaultGlobalCommitter("");
+            this.globalCommittableSerializer = StringCommittableSerializer.INSTANCE;
+            return this;
+        }
 
-	/**
-	 * This committer always re-commits the committables data it received.
-	 */
-	static class AlwaysRetryCommitter extends AbstractTestCommitter<String> {
+        public Builder setGlobalCommitter(Supplier<Queue<String>> queueSupplier) {
+            this.globalCommitter = new DefaultGlobalCommitter(queueSupplier);
+            this.globalCommittableSerializer = StringCommittableSerializer.INSTANCE;
+            return this;
+        }
 
-		@Override
-		public List<String> commit(List<String> committables) {
-			return committables;
-		}
-	}
+        public TestSink build() {
+            return new TestSink(
+                    writer,
+                    writerStateSerializer,
+                    committer,
+                    committableSerializer,
+                    globalCommitter,
+                    globalCommittableSerializer);
+        }
+    }
 
-	/**
-	 * The class used for normal global committer test.
-	 */
-	static class TestGlobalCommitter extends TestCommitter implements GlobalCommitter<String, String> {
+    // -------------------------------------- Sink Writer ------------------------------------------
 
-		static final Function<List<String>, String> COMBINER = (x) -> String.join("+", x);
+    /** Base class for out testing {@link SinkWriter Writers}. */
+    static class DefaultSinkWriter implements SinkWriter<Integer, String, String>, Serializable {
 
-		private final String committedSuccessData;
+        protected List<String> elements;
 
-		TestGlobalCommitter(String committedSuccessData) {
-			this.committedSuccessData = committedSuccessData;
-		}
+        protected ProcessingTimeService processingTimerService;
 
-		@Override
-		public List<String> filterRecoveredCommittables(List<String> globalCommittables) {
-			if (committedSuccessData == null) {
-				return globalCommittables;
-			}
-			return globalCommittables
-					.stream()
-					.filter(s -> !s.equals(committedSuccessData))
-					.collect(Collectors.toList());
-		}
+        DefaultSinkWriter() {
+            this.elements = new ArrayList<>();
+        }
 
-		@Override
-		public String combine(List<String> committables) {
-			return COMBINER.apply(committables);
-		}
+        @Override
+        public void write(Integer element, Context context) {
+            elements.add(
+                    Tuple3.of(element, context.timestamp(), context.currentWatermark()).toString());
+        }
 
-		@Override
-		public void endOfInput() {
-			this.committedData.add("end of input");
-		}
-	}
+        @Override
+        public List<String> prepareCommit(boolean flush) {
+            List<String> result = elements;
+            elements = new ArrayList<>();
+            return result;
+        }
 
-	/**
-	 * This global committer always re-commits the committables data it received.
-	 */
-	static class AlwaysRetryGlobalCommitter extends AbstractTestCommitter<String> implements GlobalCommitter<String, String> {
+        @Override
+        public List<String> snapshotState() {
+            return Collections.emptyList();
+        }
 
-		@Override
-		public List<String> filterRecoveredCommittables(List<String> globalCommittables) {
-			return Collections.emptyList();
-		}
+        @Override
+        public void close() throws Exception {}
 
-		@Override
-		public String combine(List<String> committables) {
-			return String.join("|", committables);
-		}
+        void restoredFrom(List<String> states) {}
 
-		@Override
-		public void endOfInput() {
+        void setProcessingTimerService(ProcessingTimeService processingTimerService) {
+            this.processingTimerService = processingTimerService;
+        }
+    }
 
-		}
+    // -------------------------------------- Sink Committer ---------------------------------------
 
-		@Override
-		public List<String> commit(List<String> committables) {
-			return committables;
-		}
-	}
+    /** Base class for testing {@link Committer} and {@link GlobalCommitter}. */
+    static class DefaultCommitter implements Committer<String>, Serializable {
+
+        @Nullable private Queue<String> committedData;
+
+        private boolean isClosed;
+
+        @Nullable private final Supplier<Queue<String>> queueSupplier;
+
+        public DefaultCommitter() {
+            this.committedData = new ConcurrentLinkedQueue<>();
+            this.isClosed = false;
+            this.queueSupplier = null;
+        }
+
+        public DefaultCommitter(@Nullable Supplier<Queue<String>> queueSupplier) {
+            this.queueSupplier = queueSupplier;
+            this.isClosed = false;
+            this.committedData = null;
+        }
+
+        public List<String> getCommittedData() {
+            if (committedData != null) {
+                return new ArrayList<>(committedData);
+            } else {
+                return Collections.emptyList();
+            }
+        }
+
+        @Override
+        public List<String> commit(List<String> committables) {
+            if (committedData == null) {
+                assertNotNull(queueSupplier);
+                committedData = queueSupplier.get();
+            }
+            committedData.addAll(committables);
+            return Collections.emptyList();
+        }
+
+        public void close() throws Exception {
+            isClosed = true;
+        }
+
+        public boolean isClosed() {
+            return isClosed;
+        }
+    }
+
+    /** A {@link Committer} that always re-commits the committables data it received. */
+    static class AlwaysRetryCommitter extends DefaultCommitter implements Committer<String> {
+
+        @Override
+        public List<String> commit(List<String> committables) {
+            return committables;
+        }
+    }
+
+    // ------------------------------------- Sink Global Committer ---------------------------------
+
+    /** A {@link GlobalCommitter} that always commits global committables successfully. */
+    static class DefaultGlobalCommitter extends DefaultCommitter
+            implements GlobalCommitter<String, String> {
+
+        static final Function<List<String>, String> COMBINER =
+                strings -> {
+                    // we sort here because we want to have a deterministic result during the unit
+                    // test
+                    Collections.sort(strings);
+                    return String.join("+", strings);
+                };
+
+        private final String committedSuccessData;
+
+        DefaultGlobalCommitter() {
+            this("");
+        }
+
+        DefaultGlobalCommitter(String committedSuccessData) {
+            this.committedSuccessData = committedSuccessData;
+        }
+
+        DefaultGlobalCommitter(Supplier<Queue<String>> queueSupplier) {
+            super(queueSupplier);
+            committedSuccessData = "";
+        }
+
+        @Override
+        public List<String> filterRecoveredCommittables(List<String> globalCommittables) {
+            if (committedSuccessData == null) {
+                return globalCommittables;
+            }
+            return globalCommittables.stream()
+                    .filter(s -> !s.equals(committedSuccessData))
+                    .collect(Collectors.toList());
+        }
+
+        @Override
+        public String combine(List<String> committables) {
+            return COMBINER.apply(committables);
+        }
+
+        @Override
+        public void endOfInput() {
+            commit(Collections.singletonList("end of input"));
+        }
+    }
+
+    /** A {@link GlobalCommitter} that always re-commits global committables it received. */
+    static class AlwaysRetryGlobalCommitter extends DefaultGlobalCommitter {
+
+        @Override
+        public List<String> filterRecoveredCommittables(List<String> globalCommittables) {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public String combine(List<String> committables) {
+            return String.join("|", committables);
+        }
+
+        @Override
+        public void endOfInput() {}
+
+        @Override
+        public List<String> commit(List<String> committables) {
+            return committables;
+        }
+    }
+
+    /**
+     * We introduce this {@link StringCommittableSerializer} is because that all the fields of
+     * {@link TestSink} should be serializable.
+     */
+    public static class StringCommittableSerializer
+            implements SimpleVersionedSerializer<String>, Serializable {
+
+        public static final StringCommittableSerializer INSTANCE =
+                new StringCommittableSerializer();
+
+        @Override
+        public int getVersion() {
+            return SimpleVersionedStringSerializer.INSTANCE.getVersion();
+        }
+
+        @Override
+        public byte[] serialize(String obj) throws IOException {
+            return SimpleVersionedStringSerializer.INSTANCE.serialize(obj);
+        }
+
+        @Override
+        public String deserialize(int version, byte[] serialized) throws IOException {
+            return SimpleVersionedStringSerializer.INSTANCE.deserialize(version, serialized);
+        }
+    }
 }

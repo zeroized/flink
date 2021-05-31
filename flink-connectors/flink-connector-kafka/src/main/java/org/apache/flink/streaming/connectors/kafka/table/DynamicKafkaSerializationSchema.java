@@ -24,6 +24,8 @@ import org.apache.flink.streaming.connectors.kafka.KafkaSerializationSchema;
 import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkKafkaPartitioner;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.types.RowKind;
+import org.apache.flink.util.Preconditions;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
 
@@ -31,130 +33,173 @@ import javax.annotation.Nullable;
 
 import java.io.Serializable;
 
-/**
- * A specific {@link KafkaSerializationSchema} for {@link KafkaDynamicSink}.
- */
+/** A specific {@link KafkaSerializationSchema} for {@link KafkaDynamicSink}. */
 class DynamicKafkaSerializationSchema
-		implements KafkaSerializationSchema<RowData>, KafkaContextAware<RowData> {
+        implements KafkaSerializationSchema<RowData>, KafkaContextAware<RowData> {
 
-	private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1L;
 
-	private final @Nullable FlinkKafkaPartitioner<RowData> partitioner;
+    private final @Nullable FlinkKafkaPartitioner<RowData> partitioner;
 
-	private final String topic;
+    private final String topic;
 
-	private final SerializationSchema<RowData> valueSerialization;
+    private final @Nullable SerializationSchema<RowData> keySerialization;
 
-	private final boolean hasMetadata;
+    private final SerializationSchema<RowData> valueSerialization;
 
-	/**
-	 * Contains the position for each value of {@link KafkaDynamicSink.WritableMetadata} in the consumed row or
-	 * -1 if this metadata key is not used.
-	 */
-	private final int[] metadataPositions;
+    private final RowData.FieldGetter[] keyFieldGetters;
 
-	private final RowData.FieldGetter[] physicalFieldGetters;
+    private final RowData.FieldGetter[] valueFieldGetters;
 
-	private int[] partitions;
+    private final boolean hasMetadata;
 
-	private int parallelInstanceId;
+    private final boolean upsertMode;
 
-	private int numParallelInstances;
+    /**
+     * Contains the position for each value of {@link KafkaDynamicSink.WritableMetadata} in the
+     * consumed row or -1 if this metadata key is not used.
+     */
+    private final int[] metadataPositions;
 
-	DynamicKafkaSerializationSchema(
-			String topic,
-			@Nullable FlinkKafkaPartitioner<RowData> partitioner,
-			SerializationSchema<RowData> valueSerialization,
-			boolean hasMetadata,
-			int[] metadataPositions,
-			RowData.FieldGetter[] physicalFieldGetters) {
-		this.topic = topic;
-		this.partitioner = partitioner;
-		this.valueSerialization = valueSerialization;
-		this.hasMetadata = hasMetadata;
-		this.metadataPositions = metadataPositions;
-		this.physicalFieldGetters = physicalFieldGetters;
-	}
+    private int[] partitions;
 
-	@Override
-	public void open(SerializationSchema.InitializationContext context) throws Exception {
-		valueSerialization.open(context);
-		if (partitioner != null) {
-			partitioner.open(parallelInstanceId, numParallelInstances);
-		}
-	}
+    private int parallelInstanceId;
 
-	@Override
-	public ProducerRecord<byte[], byte[]> serialize(RowData consumedRow, @Nullable Long timestamp) {
-		final RowData physicalRow;
-		// shortcut if no metadata is required
-		if (!hasMetadata) {
-			physicalRow = consumedRow;
-		} else {
-			final int physicalArity = physicalFieldGetters.length;
-			final GenericRowData genericRowData = new GenericRowData(
-					consumedRow.getRowKind(),
-					physicalArity);
-			for (int i = 0; i < physicalArity; i++) {
-				genericRowData.setField(i, physicalFieldGetters[i].getFieldOrNull(consumedRow));
-			}
-			physicalRow = genericRowData;
-		}
+    private int numParallelInstances;
 
-		final byte[] valueSerialized = valueSerialization.serialize(physicalRow);
+    DynamicKafkaSerializationSchema(
+            String topic,
+            @Nullable FlinkKafkaPartitioner<RowData> partitioner,
+            @Nullable SerializationSchema<RowData> keySerialization,
+            SerializationSchema<RowData> valueSerialization,
+            RowData.FieldGetter[] keyFieldGetters,
+            RowData.FieldGetter[] valueFieldGetters,
+            boolean hasMetadata,
+            int[] metadataPositions,
+            boolean upsertMode) {
+        if (upsertMode) {
+            Preconditions.checkArgument(
+                    keySerialization != null && keyFieldGetters.length > 0,
+                    "Key must be set in upsert mode for serialization schema.");
+        }
+        this.topic = topic;
+        this.partitioner = partitioner;
+        this.keySerialization = keySerialization;
+        this.valueSerialization = valueSerialization;
+        this.keyFieldGetters = keyFieldGetters;
+        this.valueFieldGetters = valueFieldGetters;
+        this.hasMetadata = hasMetadata;
+        this.metadataPositions = metadataPositions;
+        this.upsertMode = upsertMode;
+    }
 
-		final Integer partition;
-		if (partitioner != null) {
-			partition = partitioner.partition(physicalRow, null, valueSerialized, topic, partitions);
-		} else {
-			partition = null;
-		}
+    @Override
+    public void open(SerializationSchema.InitializationContext context) throws Exception {
+        if (keySerialization != null) {
+            keySerialization.open(context);
+        }
+        valueSerialization.open(context);
+        if (partitioner != null) {
+            partitioner.open(parallelInstanceId, numParallelInstances);
+        }
+    }
 
-		// shortcut if no metadata is required
-		if (!hasMetadata) {
-			return new ProducerRecord<>(topic, partition, null, null, valueSerialized);
-		}
-		return new ProducerRecord<>(
-				topic,
-				partition,
-				readMetadata(consumedRow, KafkaDynamicSink.WritableMetadata.TIMESTAMP),
-				null,
-				valueSerialized,
-				readMetadata(consumedRow, KafkaDynamicSink.WritableMetadata.HEADERS));
-	}
+    @Override
+    public ProducerRecord<byte[], byte[]> serialize(RowData consumedRow, @Nullable Long timestamp) {
+        // shortcut in case no input projection is required
+        if (keySerialization == null && !hasMetadata) {
+            final byte[] valueSerialized = valueSerialization.serialize(consumedRow);
+            return new ProducerRecord<>(
+                    topic,
+                    extractPartition(consumedRow, null, valueSerialized),
+                    null,
+                    valueSerialized);
+        }
 
-	@Override
-	public void setParallelInstanceId(int parallelInstanceId) {
-		this.parallelInstanceId = parallelInstanceId;
-	}
+        final byte[] keySerialized;
+        if (keySerialization == null) {
+            keySerialized = null;
+        } else {
+            final RowData keyRow = createProjectedRow(consumedRow, RowKind.INSERT, keyFieldGetters);
+            keySerialized = keySerialization.serialize(keyRow);
+        }
 
-	@Override
-	public void setNumParallelInstances(int numParallelInstances) {
-		this.numParallelInstances = numParallelInstances;
-	}
+        final byte[] valueSerialized;
+        final RowKind kind = consumedRow.getRowKind();
+        final RowData valueRow = createProjectedRow(consumedRow, kind, valueFieldGetters);
+        if (upsertMode) {
+            if (kind == RowKind.DELETE || kind == RowKind.UPDATE_BEFORE) {
+                // transform the message as the tombstone message
+                valueSerialized = null;
+            } else {
+                // make the message to be INSERT to be compliant with the INSERT-ONLY format
+                valueRow.setRowKind(RowKind.INSERT);
+                valueSerialized = valueSerialization.serialize(valueRow);
+            }
+        } else {
+            valueSerialized = valueSerialization.serialize(valueRow);
+        }
 
-	@Override
-	public void setPartitions(int[] partitions) {
-		this.partitions = partitions;
-	}
+        return new ProducerRecord<>(
+                topic,
+                extractPartition(consumedRow, keySerialized, valueSerialized),
+                readMetadata(consumedRow, KafkaDynamicSink.WritableMetadata.TIMESTAMP),
+                keySerialized,
+                valueSerialized,
+                readMetadata(consumedRow, KafkaDynamicSink.WritableMetadata.HEADERS));
+    }
 
-	@Override
-	public String getTargetTopic(RowData element) {
-		return topic;
-	}
+    @Override
+    public void setParallelInstanceId(int parallelInstanceId) {
+        this.parallelInstanceId = parallelInstanceId;
+    }
 
-	@SuppressWarnings("unchecked")
-	private <T> T readMetadata(RowData consumedRow, KafkaDynamicSink.WritableMetadata metadata) {
-		final int pos = metadataPositions[metadata.ordinal()];
-		if (pos < 0) {
-			return null;
-		}
-		return (T) metadata.converter.read(consumedRow, pos);
-	}
+    @Override
+    public void setNumParallelInstances(int numParallelInstances) {
+        this.numParallelInstances = numParallelInstances;
+    }
 
-	// --------------------------------------------------------------------------------------------
+    @Override
+    public void setPartitions(int[] partitions) {
+        this.partitions = partitions;
+    }
 
-	interface MetadataConverter extends Serializable {
-		Object read(RowData consumedRow, int pos);
-	}
+    @Override
+    public String getTargetTopic(RowData element) {
+        return topic;
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> T readMetadata(RowData consumedRow, KafkaDynamicSink.WritableMetadata metadata) {
+        final int pos = metadataPositions[metadata.ordinal()];
+        if (pos < 0) {
+            return null;
+        }
+        return (T) metadata.converter.read(consumedRow, pos);
+    }
+
+    private Integer extractPartition(
+            RowData consumedRow, @Nullable byte[] keySerialized, byte[] valueSerialized) {
+        if (partitioner != null) {
+            return partitioner.partition(
+                    consumedRow, keySerialized, valueSerialized, topic, partitions);
+        }
+        return null;
+    }
+
+    static RowData createProjectedRow(
+            RowData consumedRow, RowKind kind, RowData.FieldGetter[] fieldGetters) {
+        final int arity = fieldGetters.length;
+        final GenericRowData genericRowData = new GenericRowData(kind, arity);
+        for (int fieldPos = 0; fieldPos < arity; fieldPos++) {
+            genericRowData.setField(fieldPos, fieldGetters[fieldPos].getFieldOrNull(consumedRow));
+        }
+        return genericRowData;
+    }
+
+    // --------------------------------------------------------------------------------------------
+
+    interface MetadataConverter extends Serializable {
+        Object read(RowData consumedRow, int pos);
+    }
 }

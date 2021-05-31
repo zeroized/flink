@@ -24,116 +24,250 @@ import org.apache.flink.streaming.connectors.kafka.KafkaDeserializationSchema;
 import org.apache.flink.streaming.connectors.kafka.KafkaSerializationSchema;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.types.DeserializationException;
+import org.apache.flink.types.RowKind;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.Preconditions;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 
-import java.io.Serializable;
+import javax.annotation.Nullable;
 
-/**
- * A specific {@link KafkaSerializationSchema} for {@link KafkaDynamicSource}.
- */
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+
+/** A specific {@link KafkaSerializationSchema} for {@link KafkaDynamicSource}. */
 class DynamicKafkaDeserializationSchema implements KafkaDeserializationSchema<RowData> {
 
-	private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1L;
 
-	private final DeserializationSchema<RowData> valueDeserialization;
+    private final @Nullable DeserializationSchema<RowData> keyDeserialization;
 
-	private final boolean hasMetadata;
+    private final DeserializationSchema<RowData> valueDeserialization;
 
-	private final MetadataAppendingCollector metadataAppendingCollector;
+    private final boolean hasMetadata;
 
-	private final TypeInformation<RowData> producedTypeInfo;
+    private final BufferingCollector keyCollector;
 
-	DynamicKafkaDeserializationSchema(
-			DeserializationSchema<RowData> valueDeserialization,
-			boolean hasMetadata,
-			MetadataConverter[] metadataConverters,
-			TypeInformation<RowData> producedTypeInfo) {
-		this.hasMetadata = hasMetadata;
-		this.valueDeserialization = valueDeserialization;
-		this.metadataAppendingCollector = new MetadataAppendingCollector(metadataConverters);
-		this.producedTypeInfo = producedTypeInfo;
-	}
+    private final OutputProjectionCollector outputCollector;
 
-	@Override
-	public void open(DeserializationSchema.InitializationContext context) throws Exception {
-		valueDeserialization.open(context);
-	}
+    private final TypeInformation<RowData> producedTypeInfo;
 
-	@Override
-	public boolean isEndOfStream(RowData nextElement) {
-		return false;
-	}
+    private final boolean upsertMode;
 
-	@Override
-	public RowData deserialize(ConsumerRecord<byte[], byte[]> record) throws Exception {
-		throw new IllegalStateException("A collector is required for deserializing.");
-	}
+    DynamicKafkaDeserializationSchema(
+            int physicalArity,
+            @Nullable DeserializationSchema<RowData> keyDeserialization,
+            int[] keyProjection,
+            DeserializationSchema<RowData> valueDeserialization,
+            int[] valueProjection,
+            boolean hasMetadata,
+            MetadataConverter[] metadataConverters,
+            TypeInformation<RowData> producedTypeInfo,
+            boolean upsertMode) {
+        if (upsertMode) {
+            Preconditions.checkArgument(
+                    keyDeserialization != null && keyProjection.length > 0,
+                    "Key must be set in upsert mode for deserialization schema.");
+        }
+        this.keyDeserialization = keyDeserialization;
+        this.valueDeserialization = valueDeserialization;
+        this.hasMetadata = hasMetadata;
+        this.keyCollector = new BufferingCollector();
+        this.outputCollector =
+                new OutputProjectionCollector(
+                        physicalArity,
+                        keyProjection,
+                        valueProjection,
+                        metadataConverters,
+                        upsertMode);
+        this.producedTypeInfo = producedTypeInfo;
+        this.upsertMode = upsertMode;
+    }
 
-	@Override
-	public void deserialize(ConsumerRecord<byte[], byte[]> record, Collector<RowData> collector) throws Exception {
-		// shortcut if no metadata is required
-		if (!hasMetadata) {
-			valueDeserialization.deserialize(record.value(), collector);
-		} else {
-			metadataAppendingCollector.inputRecord = record;
-			metadataAppendingCollector.outputCollector = collector;
-			valueDeserialization.deserialize(record.value(), metadataAppendingCollector);
-		}
-	}
+    @Override
+    public void open(DeserializationSchema.InitializationContext context) throws Exception {
+        if (keyDeserialization != null) {
+            keyDeserialization.open(context);
+        }
+        valueDeserialization.open(context);
+    }
 
-	@Override
-	public TypeInformation<RowData> getProducedType() {
-		return producedTypeInfo;
-	}
+    @Override
+    public boolean isEndOfStream(RowData nextElement) {
+        return false;
+    }
 
-	// --------------------------------------------------------------------------------------------
+    @Override
+    public RowData deserialize(ConsumerRecord<byte[], byte[]> record) throws Exception {
+        throw new IllegalStateException("A collector is required for deserializing.");
+    }
 
-	interface MetadataConverter extends Serializable {
-		Object read(ConsumerRecord<?, ?> record);
-	}
+    @Override
+    public void deserialize(ConsumerRecord<byte[], byte[]> record, Collector<RowData> collector)
+            throws Exception {
+        // shortcut in case no output projection is required,
+        // also not for a cartesian product with the keys
+        if (keyDeserialization == null && !hasMetadata) {
+            valueDeserialization.deserialize(record.value(), collector);
+            return;
+        }
 
-	// --------------------------------------------------------------------------------------------
+        // buffer key(s)
+        if (keyDeserialization != null) {
+            keyDeserialization.deserialize(record.key(), keyCollector);
+        }
 
-	private static final class MetadataAppendingCollector implements Collector<RowData>, Serializable {
+        // project output while emitting values
+        outputCollector.inputRecord = record;
+        outputCollector.physicalKeyRows = keyCollector.buffer;
+        outputCollector.outputCollector = collector;
+        if (record.value() == null && upsertMode) {
+            // collect tombstone messages in upsert mode by hand
+            outputCollector.collect(null);
+        } else {
+            valueDeserialization.deserialize(record.value(), outputCollector);
+        }
+        keyCollector.buffer.clear();
+    }
 
-		private static final long serialVersionUID = 1L;
+    @Override
+    public TypeInformation<RowData> getProducedType() {
+        return producedTypeInfo;
+    }
 
-		private final MetadataConverter[] metadataConverters;
+    // --------------------------------------------------------------------------------------------
 
-		private transient ConsumerRecord<?, ?> inputRecord;
+    interface MetadataConverter extends Serializable {
+        Object read(ConsumerRecord<?, ?> record);
+    }
 
-		private transient Collector<RowData> outputCollector;
+    // --------------------------------------------------------------------------------------------
 
-		MetadataAppendingCollector(MetadataConverter[] metadataConverters) {
-			this.metadataConverters = metadataConverters;
-		}
+    private static final class BufferingCollector implements Collector<RowData>, Serializable {
 
-		@Override
-		public void collect(RowData physicalRow) {
-			final GenericRowData genericPhysicalRow = (GenericRowData) physicalRow;
-			final int physicalArity = physicalRow.getArity();
-			final int metadataArity = metadataConverters.length;
+        private static final long serialVersionUID = 1L;
 
-			final GenericRowData producedRow = new GenericRowData(
-					physicalRow.getRowKind(),
-					physicalArity + metadataArity);
+        private final List<RowData> buffer = new ArrayList<>();
 
-			for (int i = 0; i < physicalArity; i++) {
-				producedRow.setField(i, genericPhysicalRow.getField(i));
-			}
+        @Override
+        public void collect(RowData record) {
+            buffer.add(record);
+        }
 
-			for (int i = 0; i < metadataArity; i++) {
-				producedRow.setField(i + physicalArity, metadataConverters[i].read(inputRecord));
-			}
+        @Override
+        public void close() {
+            // nothing to do
+        }
+    }
 
-			outputCollector.collect(producedRow);
-		}
+    // --------------------------------------------------------------------------------------------
 
-		@Override
-		public void close() {
-			// nothing to do
-		}
-	}
+    /**
+     * Emits a row with key, value, and metadata fields.
+     *
+     * <p>The collector is able to handle the following kinds of keys:
+     *
+     * <ul>
+     *   <li>No key is used.
+     *   <li>A key is used.
+     *   <li>The deserialization schema emits multiple keys.
+     *   <li>Keys and values have overlapping fields.
+     *   <li>Keys are used and value is null.
+     * </ul>
+     */
+    private static final class OutputProjectionCollector
+            implements Collector<RowData>, Serializable {
+
+        private static final long serialVersionUID = 1L;
+
+        private final int physicalArity;
+
+        private final int[] keyProjection;
+
+        private final int[] valueProjection;
+
+        private final MetadataConverter[] metadataConverters;
+
+        private final boolean upsertMode;
+
+        private transient ConsumerRecord<?, ?> inputRecord;
+
+        private transient List<RowData> physicalKeyRows;
+
+        private transient Collector<RowData> outputCollector;
+
+        OutputProjectionCollector(
+                int physicalArity,
+                int[] keyProjection,
+                int[] valueProjection,
+                MetadataConverter[] metadataConverters,
+                boolean upsertMode) {
+            this.physicalArity = physicalArity;
+            this.keyProjection = keyProjection;
+            this.valueProjection = valueProjection;
+            this.metadataConverters = metadataConverters;
+            this.upsertMode = upsertMode;
+        }
+
+        @Override
+        public void collect(RowData physicalValueRow) {
+            // no key defined
+            if (keyProjection.length == 0) {
+                emitRow(null, (GenericRowData) physicalValueRow);
+                return;
+            }
+
+            // otherwise emit a value for each key
+            for (RowData physicalKeyRow : physicalKeyRows) {
+                emitRow((GenericRowData) physicalKeyRow, (GenericRowData) physicalValueRow);
+            }
+        }
+
+        @Override
+        public void close() {
+            // nothing to do
+        }
+
+        private void emitRow(
+                @Nullable GenericRowData physicalKeyRow,
+                @Nullable GenericRowData physicalValueRow) {
+            final RowKind rowKind;
+            if (physicalValueRow == null) {
+                if (upsertMode) {
+                    rowKind = RowKind.DELETE;
+                } else {
+                    throw new DeserializationException(
+                            "Invalid null value received in non-upsert mode. Could not to set row kind for output record.");
+                }
+            } else {
+                rowKind = physicalValueRow.getRowKind();
+            }
+
+            final int metadataArity = metadataConverters.length;
+            final GenericRowData producedRow =
+                    new GenericRowData(rowKind, physicalArity + metadataArity);
+
+            for (int keyPos = 0; keyPos < keyProjection.length; keyPos++) {
+                assert physicalKeyRow != null;
+                producedRow.setField(keyProjection[keyPos], physicalKeyRow.getField(keyPos));
+            }
+
+            if (physicalValueRow != null) {
+                for (int valuePos = 0; valuePos < valueProjection.length; valuePos++) {
+                    producedRow.setField(
+                            valueProjection[valuePos], physicalValueRow.getField(valuePos));
+                }
+            }
+
+            for (int metadataPos = 0; metadataPos < metadataArity; metadataPos++) {
+                producedRow.setField(
+                        physicalArity + metadataPos,
+                        metadataConverters[metadataPos].read(inputRecord));
+            }
+
+            outputCollector.collect(producedRow);
+        }
+    }
 }
